@@ -16,7 +16,7 @@ with st.sidebar:
     linklist_start_number = st.number_input("Linklist Start Number", min_value=1, value=50, step=1)
 
 # --- FILE UPLOADER ---
-uploaded_file = st.file_uploader("Upload your source file", type=['txt', 'log', 'dat'])
+uploaded_file = st.file_uploader("Upload your source file", type=['csv','txt', 'log', 'dat'])
 
 def process_linklist(file_content, start_no):
     # --- PART A: ROBUST READING ---
