@@ -11,9 +11,9 @@ st.write("Upload your files below to generate the Final Data Worksheet exactly l
 # --- UI: FILE UPLOADERS ---
 col1, col2 = st.columns(2)
 with col1:
-    xml_upload = st.file_uploader("Upload XML File (0073i301_de_FR.xml)", type=['xml'])
+    xml_upload = st.file_uploader("Upload XML File", type=['xml'])
 with col2:
-    log_upload = st.file_uploader("Upload Log/Text File (IDMLog.txt)", type=['txt', 'log'])
+    log_upload = st.file_uploader("Upload Log/File (IDMLog.txt)", type=['txt', 'log'])
 
 def parse_log_section(content, start_marker, end_marker, replacements, columns, delimiter=']'):
     """Replicates VBA Do-Loop, Replace, and Split logic [cite: 25-30, 94-95]."""
