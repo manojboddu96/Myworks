@@ -45,7 +45,6 @@ def parse_log_section(content, start_marker, end_marker, replacements, columns, 
 
 # --- HELPER FUNCTIONS: XML DEEP EXPORT ---
 def get_xml_deep_export(xml_content):
-    """Parses XML data using the specific headers provided."""
     root = ET.fromstring(xml_content)
     u_info, m_price, a_price, restr_tab, min_p = [], [], [], [], []
 
@@ -54,7 +53,7 @@ def get_xml_deep_export(xml_content):
         for item in serie.findall('.//ITEM'):
             u_name = item.get('TYPE_NO')
             
-            # 1. Unit Info Tab - Includes EAN_NUMBER
+            # 1. Unit Info Tab - Added CLASSIFICATION_CODE
             dims = [p.get('BASIC_SHAPE_NOMINAL_VALUE', '0') for p in item.findall('.//BASIC_SHAPE_PARAMETER')]
             u_info.append({
                 "SERIE_NO": s_no,
@@ -62,45 +61,54 @@ def get_xml_deep_export(xml_content):
                 "Width": dims[0] if len(dims) > 0 else 0,
                 "Depth": dims[1] if len(dims) > 1 else 0,
                 "Height": dims[2] if len(dims) > 2 else 0,
-                "EDP_NUMBER": item.findtext('EDP_NUMBER') or item.get('EDP_NUMBER'),
-                "EAN_NUMBER": item.findtext('EAN_NUMBER') or item.get('EAN_NUMBER'), # Added here
-                "WEIGHT": item.findtext('WEIGHT') or item.get('WEIGHT'),
-                "VOLUME": item.findtext('VOLUME') or item.get('VOLUME'),
-                "CONSTRUCTION_ID": item.findtext('CONSTRUCTION_ID') or item.get('CONSTRUCTION_ID'),
-                "CLASSIFICATIONS": "|".join([c.text for c in item.findall('.//CLASSIFICATION') if c.text])
+                "EDP_NUMBER": item.findtext('EDP_NUMBER'),
+                "EAN_NUMBER": item.findtext('EAN_NUMBER'),
+                "WEIGHT": item.findtext('WEIGHT'),
+                "VOLUME": item.findtext('VOLUME'),
+                "CONSTRUCTION_ID": item.findtext('CONSTRUCTION_ID'),
+                "CLASSIFICATIONS": "|".join([c.text for c in item.findall('.//CLASSIFICATION') if c.text]),
+                "CLASSIFICATION_CODE": "|".join([c.get('CLASSIFICATION_CODE', '') for c in item.findall('.//CLASSIFICATION')])
             })
 
-            # 2. Prices logic
-            for price_node in item.findall('.//PRICE'):
-                p_data = {
-                    "SERIE_NO": s_no,
-                    "TYPE_NO": u_name,
-                    "PRICE_FEATURE_GROUP_BASE_PRICE_REF": price_node.get('PRICE_FEATURE_GROUP_BASE_PRICE_REF'),
-                    "PRICE_TYPE_REF": price_node.get('PRICE_TYPE_REF'),
-                    "CALC_GROUP_REF": price_node.get('CALC_GROUP_REF'),
-                    "PRICE_FIELD": price_node.get('PRICE_FIELD'),
-                    "PRICE": price_node.text
-                }
-                if p_data["PRICE_TYPE_REF"] == "1":
-                    m_price.append(p_data)
-                else:
-                    a_price.append(p_data)
-                
-                if price_node.get('PRICE_MINIMUM_BASIC'):
-                    p_min = p_data.copy()
-                    p_min.update({
-                        "PRICE_MINIMUM_BASIC": price_node.get('PRICE_MINIMUM_BASIC'),
-                        "BASIC_PRICE_UNIT": price_node.get('BASIC_PRICE_UNIT')
-                    })
-                    min_p.append(p_min)
+            # 2. Prices - Deep Nesting Logic
+            # Main and Additional Price usually under PRICE_FEATURE_GROUP_REF
+            for p_ref in item.findall('.//PRICE_FEATURE_GROUP_REF'):
+                for price_node in p_ref.findall('.//PRICE'):
+                    p_data = {
+                        "SERIE_NO": s_no,
+                        "TYPE_NO": u_name,
+                        "PRICE_FEATURE_GROUP_NO": p_ref.get('PRICE_FEATURE_GROUP_NO'),
+                        "PRICE_FIELD": price_node.get('PRICE_FIELD'),
+                        "PRICE": price_node.text,
+                        "PRICE_TYPE_NO": price_node.get('PRICE_TYPE_NO')
+                    }
+                    if p_data["PRICE_TYPE_NO"] == "1":
+                        m_price.append(p_data)
+                    else:
+                        a_price.append(p_data)
 
-            # 3. RESTRICTIONS Tab
-            for r in item.findall('.//RESTRICTION'):
-                restr_tab.append({
-                    "SERIE_NO": s_no,
-                    "TYPE_NO": u_name,
-                    "RESTRICTIONS": r.get('RESTRICTION_NO') or r.text
-                })
+            # Minimum Price - Under PRICE_FEATURE_GROUP_BASE_PRICE_REF
+            for p_base in item.findall('.//PRICE_FEATURE_GROUP_BASE_PRICE_REF'):
+                for item_p in p_base.findall('.//ITEM_PRICE'):
+                    for price_n in item_p.findall('.//PRICE'):
+                        min_p.append({
+                            "SERIE_NO": s_no,
+                            "TYPE_NO": u_name,
+                            "ITEM_PRICE": item_p.get('ITEM_PRICE_NO'),
+                            "PRICE_FIELD": price_n.get('PRICE_FIELD'),
+                            "PRICE": price_n.text,
+                            "PRICE_MINIMUM_BASIC": price_n.get('PRICE_MINIMUM_BASIC'),
+                            "BASIC_PRICE_UNIT": price_n.get('BASIC_PRICE_UNIT')
+                        })
+
+            # 3. RESTRICTIONS - Under RESTRICTION_REF
+            for r_ref in item.findall('.//RESTRICTION_REF'):
+                for r_node in r_ref.findall('.//RESTRICTION'):
+                    restr_tab.append({
+                        "SERIE_NO": s_no,
+                        "TYPE_NO": u_name,
+                        "RESTRICTION_NO": r_node.get('RESTRICTION_NO')
+                    })
 
     return {
         "Unit Info": pd.DataFrame(u_info),
@@ -133,7 +141,6 @@ if xml_upload and log_upload:
             xml_content = xml_upload.getvalue().decode("utf-8")
             log_content = log_upload.getvalue().decode("utf-8", errors="ignore")
             
-            # XML processing for Log Splitter
             root = ET.fromstring(xml_content)
             unit_rows, series_rows = [], []
             for serie in root.findall('.//SERIE'):
@@ -153,15 +160,15 @@ if xml_upload and log_upload:
                 df_units.to_excel(writer, sheet_name='Unit Info', index=False)
                 df_series.to_excel(writer, sheet_name='Series ID Info', index=False)
                 
-                # Full Tab Splitting logic
-                parse_log_section(log_content, "new products Added in Catalog", "*****", {"[Product Description": "", ")[Product Code": ""}, ["Sr_No", "Series ID", "Product Code", "Description"]).to_excel(writer, sheet_name='NewProduct', index=False)
-                parse_log_section(log_content, "products deleted from catalog", "*****", {")[Series": "", ": [Unit Name": "", " :[Order Code": "", ":[Description": ""}, ["Sr_No", "Series No", "Product Code", "Order Code", "Description"]).to_excel(writer, sheet_name='DeletedProduct', index=False)
-                parse_log_section(log_content, "usercode value  updated", "*****", {") [Old Usercode": "", " [New UserCode": ""}, ["Sr_No", "Old Product Code", "New Product Code", "Old Order Code", "New Order Code"]).to_excel(writer, sheet_name='CodeUpdated', index=False)
-                parse_log_section(log_content, "new options Added in Catalog", "*****", {")[Feature Code": "", " [Feature Description": "", "[Option Code": "", " [Option Description": ""}, ["Sr_No", "Type ID", "Feature Code", "Feature Description", "Option Code", "Entry ID", "Option Description"]).to_excel(writer, sheet_name='NewOptions', index=False)
-                parse_log_section(log_content, "new Features Added in Catalog", "*****", {") [Feature Code": "", "[Feature Description": ""}, ["Sr_No", "Type ID", "Feature Code/Order Code", "Feature Description/Type Name"]).to_excel(writer, sheet_name='NewFeatures', index=False)
-                parse_log_section(log_content, "New Linkref Added on folllowing Products", "*****", {") [UnitName": "", " [LinkRef": ""}, ["Sr_No", "Unit Name", "Linkref Added"]).to_excel(writer, sheet_name='LinkListAddedToUnit', index=False)
-                parse_log_section(log_content, "New LinkList Added in Catalog", "*****", {}, ["Sr_No", "Linkref Added", "Link List Name"], delimiter=")").to_excel(writer, sheet_name='LinkListAddedInLinks', index=False)
-                parse_log_section(log_content, "Added  new addon(s)", "*****", {") [UnitName": "", "[Addons": ""}, ["Sr_No", "Unit Name", "Addons Added"]).to_excel(writer, sheet_name='AddonsAddedToUnits', index=False)
+                # Tab Splitting
+                parse_log_section(log_content, "new products Added", "*****", {"[Product Description": ""}, ["Sr_No", "Series", "Code", "Desc"]).to_excel(writer, sheet_name='NewProduct', index=False)
+                parse_log_section(log_content, "products deleted", "*****", {":[Order Code": ""}, ["Sr_No", "Series", "Code", "Order", "Desc"]).to_excel(writer, sheet_name='DeletedProduct', index=False)
+                parse_log_section(log_content, "usercode updated", "*****", {}, ["Sr_No", "Old_P", "New_P", "Old_O", "New_O"]).to_excel(writer, sheet_name='CodeUpdated', index=False)
+                parse_log_section(log_content, "new options Added", "*****", {}, ["Sr_No", "Type", "F_Code", "F_Desc", "O_Code", "ID", "O_Desc"]).to_excel(writer, sheet_name='NewOptions', index=False)
+                parse_log_section(log_content, "new Features Added", "*****", {}, ["Sr_No", "Type", "F_Code", "F_Desc"]).to_excel(writer, sheet_name='NewFeatures', index=False)
+                parse_log_section(log_content, "New Linkref Added", "*****", {}, ["Sr_No", "Unit", "Link"]).to_excel(writer, sheet_name='LinkListAddedToUnit', index=False)
+                parse_log_section(log_content, "New LinkList Added", "*****", {}, ["Sr_No", "Link", "Name"], delimiter=")").to_excel(writer, sheet_name='LinkListAddedInLinks', index=False)
+                parse_log_section(log_content, "Added  new addon", "*****", {}, ["Sr_No", "Unit", "Addon"]).to_excel(writer, sheet_name='AddonsAddedToUnits', index=False)
 
             st.success("✅ Log split processed!")
             st.download_button("📥 Download Final Data Worksheet", out_log.getvalue(), "Final_Data_Worksheet.xlsx")
