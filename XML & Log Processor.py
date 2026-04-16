@@ -15,7 +15,7 @@ with col2:
     log_upload = st.file_uploader("Upload Log/Text File", type=['txt', 'log'])
 
 def get_xml_deep_export(xml_content):
-    """Refined parser for specific IDM child-tag structures."""
+    """Refined parser to handle ADDITIONAL_PRICE_GROUP logic explicitly."""
     root = ET.fromstring(xml_content)
     u_info, m_price, a_price, restr_tab, min_p = [], [], [], [], []
 
@@ -24,8 +24,7 @@ def get_xml_deep_export(xml_content):
         for item in serie.findall('.//ITEM'):
             u_name = item.get('TYPE_NO')
             
-            # 1. Dimensions (Scanning BASIC_SHAPE_PARAMETER by Name)
-            # Finds 'b' (width), 'h' (height), and 't' (depth) inside BASIC_PROFILE
+            # 1. Dimensions and Unit Info
             width = depth = height = "0"
             for param in item.findall('.//BASIC_SHAPE_PARAMETER'):
                 name = param.get('BASIC_SHAPE_NAME', '').lower()
@@ -35,8 +34,7 @@ def get_xml_deep_export(xml_content):
                 elif name == 't': depth = val
 
             u_info.append({
-                "SERIE_NO": s_no,
-                "TYPE_NO": u_name,
+                "SERIE_NO": s_no, "TYPE_NO": u_name,
                 "Width": width, "Depth": depth, "Height": height,
                 "EDP_NUMBER": item.findtext('.//EDP_NUMBER') or "",
                 "EAN_NUMBER": item.findtext('.//EAN_NUMBER') or "",
@@ -46,33 +44,41 @@ def get_xml_deep_export(xml_content):
                 "CLASSIFICATION_CODE": "|".join([c.findtext('CLASSIFICATION_CODE') for c in item.findall('.//CLASSIFICATION') if c.findtext('CLASSIFICATION_CODE')])
             })
 
-            # 2. Prices (Main and Additional)
-            # Searching for any group containing price references
-            for group in item.findall(".//*"):
-                if "PRICE_GROUP" in group.tag or "PRICE_FEATURE_GROUP" in group.tag:
+            # 2. Prices - Logic for Main vs Additional based on Tag Name
+            # Iterate through all children of ITEM to find price containers
+            for group in item:
+                tag_name = group.tag
+                if "PRICE_GROUP" in tag_name or "PRICE_FEATURE_GROUP" in tag_name:
+                    
+                    # Find Group ID (PRICE_FEATURE_GROUP_NO)
                     group_ref = group.find('.//PRICE_FEATURE_GROUP_REF')
                     group_no = group.get('PRICE_FEATURE_GROUP_NO') or (group_ref.get('PRICE_FEATURE_GROUP_NO') if group_ref is not None else None)
                     
+                    # Determine Price Type based on tag name first, then attribute
+                    is_additional = "ADDITIONAL" in tag_name.upper()
                     type_ref = group.find('.//PRICE_TYPE_REF')
-                    p_type = group.get('PRICE_TYPE_NO') or (type_ref.get('PRICE_TYPE_NO') if type_ref is not None else "1")
-                    
+                    p_type_val = group.get('PRICE_TYPE_NO') or (type_ref.get('PRICE_TYPE_NO') if type_ref is not None else "1")
+
                     for item_p in group.findall('.//ITEM_PRICE'):
                         field = item_p.findtext('PRICE_FIELD')
-                        price_val = item_p.findtext('PRICE')
+                        price_val = item_price_text = item_p.findtext('PRICE')
                         
                         p_data = {
                             "SERIE_NO": s_no, "TYPE_NO": u_name,
                             "PRICE_FEATURE_GROUP_NO": group_no,
                             "PRICE_FIELD": field, "PRICE": price_val,
-                            "PRICE_TYPE_NO": p_type
+                            "PRICE_TYPE_NO": p_type_val
                         }
 
-                        if p_type == "1":
+                        # Explicit Routing: If it's in an ADDITIONAL tag, force to Additional tab
+                        if is_additional:
+                            a_price.append(p_data)
+                        elif p_type_val == "1":
                             m_price.append(p_data)
                         else:
                             a_price.append(p_data)
 
-                        # Minimum Price (Checks child tags as per your snippet)
+                        # Minimum Price (Check child tags)
                         min_basic = item_p.findtext('PRICE_MINIMUM_BASIC')
                         if min_basic:
                             p_min = p_data.copy()
@@ -83,11 +89,12 @@ def get_xml_deep_export(xml_content):
                             min_p.append(p_min)
 
             # 3. RESTRICTIONS
-            for r_ref in item.findall('.//RESTRICTION_REF'):
-                restr_tab.append({
-                    "SERIE_NO": s_no, "TYPE_NO": u_name,
-                    "RESTRICTION_NO": r_ref.get('RESTRICTION_NO')
-                })
+            for rest_container in item.findall('.//RESTRICTIONS'):
+                for r_ref in rest_container.findall('.//RESTRICTION_REF'):
+                    restr_tab.append({
+                        "SERIE_NO": s_no, "TYPE_NO": u_name,
+                        "RESTRICTION_NO": r_ref.get('RESTRICTION_NO')
+                    })
 
     return {
         "Unit Info": pd.DataFrame(u_info),
@@ -143,6 +150,7 @@ if xml_upload and log_upload:
                 pd.DataFrame(u_rows).to_excel(writer, sheet_name='Unit Info', index=False)
                 parse_log_section(log_content, "new products Added", "*****", {}, ["Sr_No", "Series", "Code", "Desc"]).to_excel(writer, sheet_name='NewProduct', index=False)
                 parse_log_section(log_content, "products deleted", "*****", {}, ["Sr_No", "Series", "Code", "Order", "Desc"]).to_excel(writer, sheet_name='DeletedProduct', index=False)
+                # ... Add other log tabs here ...
             st.success("✅ Log split completed!")
             st.download_button("📥 Download Log Split", out_log.getvalue(), "Final_Worksheet.xlsx")
         except Exception as e: st.error(f"Error: {e}")
