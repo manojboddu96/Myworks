@@ -15,7 +15,7 @@ with col2:
     log_upload = st.file_uploader("Upload Log/Text File", type=['txt', 'log'])
 
 def get_xml_deep_export(xml_content):
-    """Specific parser for IDM nested structure using your provided snippets."""
+    """Refined parser for specific IDM child-tag structures."""
     root = ET.fromstring(xml_content)
     u_info, m_price, a_price, restr_tab, min_p = [], [], [], [], []
 
@@ -24,11 +24,20 @@ def get_xml_deep_export(xml_content):
         for item in serie.findall('.//ITEM'):
             u_name = item.get('TYPE_NO')
             
-            # 1. Unit Info & Classifications
+            # 1. Dimensions (Scanning BASIC_SHAPE_PARAMETER by Name)
+            # Finds 'b' (width), 'h' (height), and 't' (depth) inside BASIC_PROFILE
+            width = depth = height = "0"
+            for param in item.findall('.//BASIC_SHAPE_PARAMETER'):
+                name = param.get('BASIC_SHAPE_NAME', '').lower()
+                val = param.get('BASIC_SHAPE_NOMINAL_VALUE', '0')
+                if name == 'b': width = val
+                elif name == 'h': height = val
+                elif name == 't': depth = val
+
             u_info.append({
                 "SERIE_NO": s_no,
                 "TYPE_NO": u_name,
-                "Width": next((p.get('BASIC_SHAPE_NOMINAL_VALUE') for p in item.findall('.//BASIC_SHAPE_PARAMETER') if p.get('BASIC_SHAPE_PARAMETER_NO') == "1"), "0"),
+                "Width": width, "Depth": depth, "Height": height,
                 "EDP_NUMBER": item.findtext('.//EDP_NUMBER') or "",
                 "EAN_NUMBER": item.findtext('.//EAN_NUMBER') or "",
                 "WEIGHT": item.findtext('.//WEIGHT') or "",
@@ -37,30 +46,24 @@ def get_xml_deep_export(xml_content):
                 "CLASSIFICATION_CODE": "|".join([c.findtext('CLASSIFICATION_CODE') for c in item.findall('.//CLASSIFICATION') if c.findtext('CLASSIFICATION_CODE')])
             })
 
-            # 2. Prices - Logic for ADDITIONAL_PRICE_GROUP / PRICE_FEATURE_GROUP_BASE_PRICE_REF
-            # We look for any container that might have price data
+            # 2. Prices (Main and Additional)
+            # Searching for any group containing price references
             for group in item.findall(".//*"):
                 if "PRICE_GROUP" in group.tag or "PRICE_FEATURE_GROUP" in group.tag:
-                    # Get group metadata
-                    # Some groups have the NO directly, others have it in a REF child
                     group_ref = group.find('.//PRICE_FEATURE_GROUP_REF')
                     group_no = group.get('PRICE_FEATURE_GROUP_NO') or (group_ref.get('PRICE_FEATURE_GROUP_NO') if group_ref is not None else None)
                     
-                    # Get price type (Main vs Additional)
                     type_ref = group.find('.//PRICE_TYPE_REF')
                     p_type = group.get('PRICE_TYPE_NO') or (type_ref.get('PRICE_TYPE_NO') if type_ref is not None else "1")
                     
-                    # Look for ITEM_PRICE blocks
-                    for item_price in group.findall('.//ITEM_PRICE'):
-                        field = item_price.findtext('PRICE_FIELD')
-                        price_val = item_price.findtext('PRICE')
+                    for item_p in group.findall('.//ITEM_PRICE'):
+                        field = item_p.findtext('PRICE_FIELD')
+                        price_val = item_p.findtext('PRICE')
                         
                         p_data = {
-                            "SERIE_NO": s_no,
-                            "TYPE_NO": u_name,
+                            "SERIE_NO": s_no, "TYPE_NO": u_name,
                             "PRICE_FEATURE_GROUP_NO": group_no,
-                            "PRICE_FIELD": field,
-                            "PRICE": price_val,
+                            "PRICE_FIELD": field, "PRICE": price_val,
                             "PRICE_TYPE_NO": p_type
                         }
 
@@ -69,22 +72,22 @@ def get_xml_deep_export(xml_content):
                         else:
                             a_price.append(p_data)
 
-                        # Minimum Price check
-                        min_val = item_price.get('PRICE_MINIMUM_BASIC')
-                        if min_val:
+                        # Minimum Price (Checks child tags as per your snippet)
+                        min_basic = item_p.findtext('PRICE_MINIMUM_BASIC')
+                        if min_basic:
                             p_min = p_data.copy()
-                            p_min.update({"PRICE_MINIMUM_BASIC": min_val, "BASIC_PRICE_UNIT": item_price.get('BASIC_PRICE_UNIT')})
+                            p_min.update({
+                                "PRICE_MINIMUM_BASIC": min_basic,
+                                "BASIC_PRICE_UNIT": item_p.findtext('BASIC_PRICE_UNIT')
+                            })
                             min_p.append(p_min)
 
             # 3. RESTRICTIONS
-            # Looking for RESTRICTION_REF inside RESTRICTIONS tag
-            for rest_container in item.findall('.//RESTRICTIONS'):
-                for r_ref in rest_container.findall('.//RESTRICTION_REF'):
-                    restr_tab.append({
-                        "SERIE_NO": s_no,
-                        "TYPE_NO": u_name,
-                        "RESTRICTION_NO": r_ref.get('RESTRICTION_NO')
-                    })
+            for r_ref in item.findall('.//RESTRICTION_REF'):
+                restr_tab.append({
+                    "SERIE_NO": s_no, "TYPE_NO": u_name,
+                    "RESTRICTION_NO": r_ref.get('RESTRICTION_NO')
+                })
 
     return {
         "Unit Info": pd.DataFrame(u_info),
@@ -94,19 +97,19 @@ def get_xml_deep_export(xml_content):
         "Minimum Price": pd.DataFrame(min_p)
     }
 
+# --- LOG SPLITTER PARSER ---
 def parse_log_section(content, start_marker, end_marker, replacements, columns, delimiter=']'):
-    extracted_lines = []
+    extracted = []
     record = False
     for line in content.splitlines():
         if start_marker in line: record = True; continue
         if end_marker in line and record: record = False; break
         if record and line.strip():
-            clean_line = line.strip()
-            for old, new in replacements.items(): clean_line = clean_line.replace(old, new)
-            extracted_lines.append(clean_line)
-    if not extracted_lines: return pd.DataFrame(columns=columns)
-    data = [line.split(delimiter) for line in extracted_lines]
-    df = pd.DataFrame(data)
+            clean = line.strip()
+            for old, new in replacements.items(): clean = clean.replace(old, new)
+            extracted.append(clean)
+    if not extracted: return pd.DataFrame(columns=columns)
+    df = pd.DataFrame([l.split(delimiter) for l in extracted])
     df.columns = columns[:df.shape[1]]
     return df
 
@@ -140,7 +143,6 @@ if xml_upload and log_upload:
                 pd.DataFrame(u_rows).to_excel(writer, sheet_name='Unit Info', index=False)
                 parse_log_section(log_content, "new products Added", "*****", {}, ["Sr_No", "Series", "Code", "Desc"]).to_excel(writer, sheet_name='NewProduct', index=False)
                 parse_log_section(log_content, "products deleted", "*****", {}, ["Sr_No", "Series", "Code", "Order", "Desc"]).to_excel(writer, sheet_name='DeletedProduct', index=False)
-            
             st.success("✅ Log split completed!")
-            st.download_button("📥 Download Log Split", out_log.getvalue(), "Final_Data_Worksheet.xlsx")
+            st.download_button("📥 Download Log Split", out_log.getvalue(), "Final_Worksheet.xlsx")
         except Exception as e: st.error(f"Error: {e}")
