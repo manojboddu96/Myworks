@@ -15,36 +15,8 @@ with col1:
 with col2:
     log_upload = st.file_uploader("Upload Log/Text File", type=['txt', 'log'])
 
-# --- HELPER FUNCTIONS: LOG PARSING ---
-def parse_log_section(content, start_marker, end_marker, replacements, columns, delimiter=']'):
-    extracted_lines = []
-    record = False
-    for line in content.splitlines():
-        if start_marker in line:
-            record = True
-            continue
-        if end_marker in line and record:
-            record = False
-            break
-        if record and line.strip():
-            clean_line = line.strip()
-            for old, new in replacements.items():
-                clean_line = clean_line.replace(old, new)
-            extracted_lines.append(clean_line)
-    
-    if not extracted_lines: return pd.DataFrame(columns=columns)
-    data = [line.split(delimiter) for line in extracted_lines]
-    df = pd.DataFrame(data)
-    actual_count = df.shape[1]
-    header_list = columns[:actual_count]
-    if actual_count > len(columns):
-        for i in range(len(columns), actual_count):
-            header_list.append(f"Extra_Col_{i+1}")
-    df.columns = header_list
-    return df
-
-# --- HELPER FUNCTIONS: XML DEEP EXPORT ---
 def get_xml_deep_export(xml_content):
+    """Deep search logic to prevent empty columns regardless of XML nesting."""
     root = ET.fromstring(xml_content)
     u_info, m_price, a_price, restr_tab, min_p = [], [], [], [], []
 
@@ -53,7 +25,7 @@ def get_xml_deep_export(xml_content):
         for item in serie.findall('.//ITEM'):
             u_name = item.get('TYPE_NO')
             
-            # 1. Unit Info Tab - Added CLASSIFICATION_CODE
+            # 1. Unit Info Tab
             dims = [p.get('BASIC_SHAPE_NOMINAL_VALUE', '0') for p in item.findall('.//BASIC_SHAPE_PARAMETER')]
             u_info.append({
                 "SERIE_NO": s_no,
@@ -61,23 +33,23 @@ def get_xml_deep_export(xml_content):
                 "Width": dims[0] if len(dims) > 0 else 0,
                 "Depth": dims[1] if len(dims) > 1 else 0,
                 "Height": dims[2] if len(dims) > 2 else 0,
-                "EDP_NUMBER": item.findtext('EDP_NUMBER'),
-                "EAN_NUMBER": item.findtext('EAN_NUMBER'),
-                "WEIGHT": item.findtext('WEIGHT'),
-                "VOLUME": item.findtext('VOLUME'),
-                "CONSTRUCTION_ID": item.findtext('CONSTRUCTION_ID'),
+                "EDP_NUMBER": item.findtext('.//EDP_NUMBER') or item.get('EDP_NUMBER'),
+                "EAN_NUMBER": item.findtext('.//EAN_NUMBER') or item.get('EAN_NUMBER'),
+                "WEIGHT": item.findtext('.//WEIGHT') or item.get('WEIGHT'),
+                "VOLUME": item.findtext('.//VOLUME') or item.get('VOLUME'),
+                "CONSTRUCTION_ID": item.findtext('.//CONSTRUCTION_ID') or item.get('CONSTRUCTION_ID'),
                 "CLASSIFICATIONS": "|".join([c.text for c in item.findall('.//CLASSIFICATION') if c.text]),
                 "CLASSIFICATION_CODE": "|".join([c.get('CLASSIFICATION_CODE', '') for c in item.findall('.//CLASSIFICATION')])
             })
 
-            # 2. Prices - Deep Nesting Logic
-            # Main and Additional Price usually under PRICE_FEATURE_GROUP_REF
-            for p_ref in item.findall('.//PRICE_FEATURE_GROUP_REF'):
-                for price_node in p_ref.findall('.//PRICE'):
+            # 2. Main & Additional Price (Nested under PRICE_FEATURE_GROUP_REF)
+            for p_group in item.findall('.//PRICE_FEATURE_GROUP_REF'):
+                group_no = p_group.get('PRICE_FEATURE_GROUP_NO')
+                for price_node in p_group.findall('.//PRICE'):
                     p_data = {
                         "SERIE_NO": s_no,
                         "TYPE_NO": u_name,
-                        "PRICE_FEATURE_GROUP_NO": p_ref.get('PRICE_FEATURE_GROUP_NO'),
+                        "PRICE_FEATURE_GROUP_NO": group_no,
                         "PRICE_FIELD": price_node.get('PRICE_FIELD'),
                         "PRICE": price_node.text,
                         "PRICE_TYPE_NO": price_node.get('PRICE_TYPE_NO')
@@ -87,21 +59,22 @@ def get_xml_deep_export(xml_content):
                     else:
                         a_price.append(p_data)
 
-            # Minimum Price - Under PRICE_FEATURE_GROUP_BASE_PRICE_REF
+            # 3. Minimum Price (Nested under PRICE_FEATURE_GROUP_BASE_PRICE_REF)
             for p_base in item.findall('.//PRICE_FEATURE_GROUP_BASE_PRICE_REF'):
                 for item_p in p_base.findall('.//ITEM_PRICE'):
-                    for price_n in item_p.findall('.//PRICE'):
+                    item_p_no = item_p.get('ITEM_PRICE_NO')
+                    for price_min in item_p.findall('.//PRICE'):
                         min_p.append({
                             "SERIE_NO": s_no,
                             "TYPE_NO": u_name,
-                            "ITEM_PRICE": item_p.get('ITEM_PRICE_NO'),
-                            "PRICE_FIELD": price_n.get('PRICE_FIELD'),
-                            "PRICE": price_n.text,
-                            "PRICE_MINIMUM_BASIC": price_n.get('PRICE_MINIMUM_BASIC'),
-                            "BASIC_PRICE_UNIT": price_n.get('BASIC_PRICE_UNIT')
+                            "ITEM_PRICE": item_p_no,
+                            "PRICE_FIELD": price_min.get('PRICE_FIELD'),
+                            "PRICE": price_min.text,
+                            "PRICE_MINIMUM_BASIC": price_min.get('PRICE_MINIMUM_BASIC'),
+                            "BASIC_PRICE_UNIT": price_min.get('BASIC_PRICE_UNIT')
                         })
 
-            # 3. RESTRICTIONS - Under RESTRICTION_REF
+            # 4. RESTRICTIONS (Nested under RESTRICTION_REF)
             for r_ref in item.findall('.//RESTRICTION_REF'):
                 for r_node in r_ref.findall('.//RESTRICTION'):
                     restr_tab.append({
@@ -118,7 +91,33 @@ def get_xml_deep_export(xml_content):
         "Minimum Price": pd.DataFrame(min_p)
     }
 
-# --- EXECUTION LOGIC ---
+def parse_log_section(content, start_marker, end_marker, replacements, columns, delimiter=']'):
+    extracted_lines = []
+    record = False
+    for line in content.splitlines():
+        if start_marker in line:
+            record = True
+            continue
+        if end_marker in line and record:
+            record = False
+            break
+        if record and line.strip():
+            clean_line = line.strip()
+            for old, new in replacements.items():
+                clean_line = clean_line.replace(old, new)
+            extracted_lines.append(clean_line)
+    if not extracted_lines: return pd.DataFrame(columns=columns)
+    data = [line.split(delimiter) for line in extracted_lines]
+    df = pd.DataFrame(data)
+    actual_count = df.shape[1]
+    header_list = columns[:actual_count]
+    if actual_count > len(columns):
+        for i in range(len(columns), actual_count):
+            header_list.append(f"Extra_Col_{i+1}")
+    df.columns = header_list
+    return df
+
+# --- UI EXECUTION ---
 if xml_upload:
     st.subheader("🛠️ Option 1: XML Deep Export")
     if st.button("📊 Generate XML Export Excel"):
@@ -140,7 +139,6 @@ if xml_upload and log_upload:
         try:
             xml_content = xml_upload.getvalue().decode("utf-8")
             log_content = log_upload.getvalue().decode("utf-8", errors="ignore")
-            
             root = ET.fromstring(xml_content)
             unit_rows, series_rows = [], []
             for serie in root.findall('.//SERIE'):
@@ -150,7 +148,7 @@ if xml_upload and log_upload:
                     p_code = item.get('TYPE_NO')
                     dims = [p.get('BASIC_SHAPE_NOMINAL_VALUE', '0') for p in item.findall('.//BASIC_SHAPE_PARAMETER')]
                     unit_rows.append({"Series No": s_no, "Product Code": p_code, "ConSNO_PCode": f"{s_no}_{p_code}", "Width": dims[0] if len(dims)>0 else 0, "Depth": dims[1] if len(dims)>1 else 0, "Height": dims[2] if len(dims)>2 else 0})
-
+            
             df_units, df_series = pd.DataFrame(unit_rows), pd.DataFrame(series_rows)
             df_raw_log = pd.DataFrame(log_content.splitlines(), columns=["Raw Log Data"])
             
@@ -160,7 +158,7 @@ if xml_upload and log_upload:
                 df_units.to_excel(writer, sheet_name='Unit Info', index=False)
                 df_series.to_excel(writer, sheet_name='Series ID Info', index=False)
                 
-                # Tab Splitting
+                # Full Tab logic
                 parse_log_section(log_content, "new products Added", "*****", {"[Product Description": ""}, ["Sr_No", "Series", "Code", "Desc"]).to_excel(writer, sheet_name='NewProduct', index=False)
                 parse_log_section(log_content, "products deleted", "*****", {":[Order Code": ""}, ["Sr_No", "Series", "Code", "Order", "Desc"]).to_excel(writer, sheet_name='DeletedProduct', index=False)
                 parse_log_section(log_content, "usercode updated", "*****", {}, ["Sr_No", "Old_P", "New_P", "Old_O", "New_O"]).to_excel(writer, sheet_name='CodeUpdated', index=False)
