@@ -17,7 +17,6 @@ with col2:
 
 # --- HELPER FUNCTIONS: LOG PARSING ---
 def parse_log_section(content, start_marker, end_marker, replacements, columns, delimiter=']'):
-    """Replicates VBA logic for parsing sections of the log [cite: 25-43, 94-95]."""
     extracted_lines = []
     record = False
     for line in content.splitlines():
@@ -46,48 +45,47 @@ def parse_log_section(content, start_marker, end_marker, replacements, columns, 
 
 # --- HELPER FUNCTIONS: XML DEEP EXPORT ---
 def get_xml_deep_export(xml_content):
-    """Parses comprehensive XML data with fixed attribute and node detection [cite: 6-18]."""
+    """Parses XML data using the specific headers provided."""
     root = ET.fromstring(xml_content)
-    u_info, m_price, a_price, restr, min_p = [], [], [], [], []
+    u_info, m_price, a_price, restr_tab, min_p = [], [], [], [], []
 
     for serie in root.findall('.//SERIE'):
         s_no = serie.get('SERIE_NO')
         for item in serie.findall('.//ITEM'):
             u_name = item.get('TYPE_NO')
             
-            # 1. Unit Info [cite: 8-11]
+            # 1. Unit Info Tab - Includes EAN_NUMBER
             dims = [p.get('BASIC_SHAPE_NOMINAL_VALUE', '0') for p in item.findall('.//BASIC_SHAPE_PARAMETER')]
             u_info.append({
-                "Series": s_no,
-                "Unit Name": u_name,
+                "SERIE_NO": s_no,
+                "TYPE_NO": u_name,
                 "Width": dims[0] if len(dims) > 0 else 0,
                 "Depth": dims[1] if len(dims) > 1 else 0,
                 "Height": dims[2] if len(dims) > 2 else 0,
-                "Exchange Number": item.findtext('EXCHANGE_NO') or item.get('EXCHANGE_NO'),
-                "EAN Number": item.findtext('EAN_NO') or item.get('EAN_NO'),
-                "Weight": item.findtext('WEIGHT') or item.get('WEIGHT'),
-                "Volume": item.findtext('VOLUME') or item.get('VOLUME'),
-                "Classifications": "|".join([c.text for c in item.findall('.//CLASSIFICATION') if c.text])
+                "EDP_NUMBER": item.findtext('EDP_NUMBER') or item.get('EDP_NUMBER'),
+                "EAN_NUMBER": item.findtext('EAN_NUMBER') or item.get('EAN_NUMBER'), # Added here
+                "WEIGHT": item.findtext('WEIGHT') or item.get('WEIGHT'),
+                "VOLUME": item.findtext('VOLUME') or item.get('VOLUME'),
+                "CONSTRUCTION_ID": item.findtext('CONSTRUCTION_ID') or item.get('CONSTRUCTION_ID'),
+                "CLASSIFICATIONS": "|".join([c.text for c in item.findall('.//CLASSIFICATION') if c.text])
             })
 
-            # 2. Prices 
+            # 2. Prices logic
             for price_node in item.findall('.//PRICE'):
                 p_data = {
-                    "Series": s_no,
-                    "Unit Name": u_name,
-                    "PRICE_FEATURE_GROUP_NO": price_node.get('PRICE_FEATURE_GROUP_NO'),
+                    "SERIE_NO": s_no,
+                    "TYPE_NO": u_name,
+                    "PRICE_FEATURE_GROUP_BASE_PRICE_REF": price_node.get('PRICE_FEATURE_GROUP_BASE_PRICE_REF'),
+                    "PRICE_TYPE_REF": price_node.get('PRICE_TYPE_REF'),
+                    "CALC_GROUP_REF": price_node.get('CALC_GROUP_REF'),
                     "PRICE_FIELD": price_node.get('PRICE_FIELD'),
-                    "PRICE": price_node.text,
-                    "PRICE_TYPE_NO": price_node.get('PRICE_TYPE_NO')
+                    "PRICE": price_node.text
                 }
-                
-                p_type = p_data["PRICE_TYPE_NO"]
-                if p_type == "1":
+                if p_data["PRICE_TYPE_REF"] == "1":
                     m_price.append(p_data)
                 else:
                     a_price.append(p_data)
                 
-                # Minimum Price check 
                 if price_node.get('PRICE_MINIMUM_BASIC'):
                     p_min = p_data.copy()
                     p_min.update({
@@ -96,19 +94,19 @@ def get_xml_deep_export(xml_content):
                     })
                     min_p.append(p_min)
 
-            # 3. Restrictions
+            # 3. RESTRICTIONS Tab
             for r in item.findall('.//RESTRICTION'):
-                restr.append({
-                    "Series": s_no,
-                    "Unit Name": u_name,
-                    "RESTRICTION_NO": r.get('RESTRICTION_NO')
+                restr_tab.append({
+                    "SERIE_NO": s_no,
+                    "TYPE_NO": u_name,
+                    "RESTRICTIONS": r.get('RESTRICTION_NO') or r.text
                 })
 
     return {
         "Unit Info": pd.DataFrame(u_info),
         "Main Price": pd.DataFrame(m_price),
         "Additional Price": pd.DataFrame(a_price),
-        "RESTRICTIONS": pd.DataFrame(restr),
+        "RESTRICTIONS": pd.DataFrame(restr_tab),
         "Minimum Price": pd.DataFrame(min_p)
     }
 
@@ -135,7 +133,7 @@ if xml_upload and log_upload:
             xml_content = xml_upload.getvalue().decode("utf-8")
             log_content = log_upload.getvalue().decode("utf-8", errors="ignore")
             
-            # Core data from XML for log tabs [cite: 6-16]
+            # XML processing for Log Splitter
             root = ET.fromstring(xml_content)
             unit_rows, series_rows = [], []
             for serie in root.findall('.//SERIE'):
@@ -155,7 +153,7 @@ if xml_upload and log_upload:
                 df_units.to_excel(writer, sheet_name='Unit Info', index=False)
                 df_series.to_excel(writer, sheet_name='Series ID Info', index=False)
                 
-                # Tab categorisations [cite: 26-108]
+                # Full Tab Splitting logic
                 parse_log_section(log_content, "new products Added in Catalog", "*****", {"[Product Description": "", ")[Product Code": ""}, ["Sr_No", "Series ID", "Product Code", "Description"]).to_excel(writer, sheet_name='NewProduct', index=False)
                 parse_log_section(log_content, "products deleted from catalog", "*****", {")[Series": "", ": [Unit Name": "", " :[Order Code": "", ":[Description": ""}, ["Sr_No", "Series No", "Product Code", "Order Code", "Description"]).to_excel(writer, sheet_name='DeletedProduct', index=False)
                 parse_log_section(log_content, "usercode value  updated", "*****", {") [Old Usercode": "", " [New UserCode": ""}, ["Sr_No", "Old Product Code", "New Product Code", "Old Order Code", "New Order Code"]).to_excel(writer, sheet_name='CodeUpdated', index=False)
