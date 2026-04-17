@@ -1,59 +1,72 @@
+import streamlit as st
 import re
-import csv
+import pandas as pd
+import io
 
-def extract_all_binary_data(input_file, output_csv):
-    # Regex for sequences of printable characters (length 3 to 100)
-    # This will catch markers we don't know yet, plus their values
-    universal_pattern = re.compile(rb'[\x20-\x7E]{3,100}')
+st.title("Catalog Binary Extractor")
+st.write("Upload your .EXE file to convert the catalog into a structured format.")
+
+uploaded_file = st.file_uploader("Choose a file", type=['exe'])
+
+if uploaded_file is not None:
+    # Read the binary content
+    content = uploaded_file.read()
     
-    # Common markers we already know (used for categorization)
-    known_markers = [
+    # 1. Configuration
+    markers = [
         b'SUPPLIER', b'GROUPS', b'MODELS', b'FINISHES', 
         b'PRODUCTS', b'DESCRIPTION', b'PRICES', b'CODEPICS',
-        b'UNITS', b'EAN', b'VAT', b'DISCOUNT', b'DIMENSIONS'
+        b'UNITS', b'DIMENSIONS', b'EAN'
     ]
+    data_pattern = re.compile(rb'[A-Za-z0-9\s\.,\-\/]{3,100}')
+    
+    extracted_records = []
+    
+    # 2. Processing with Streamlit Progress Bar
+    progress_bar = st.progress(0)
+    st.info("Scanning binary structures...")
+    
+    # Find all marker positions
+    marker_positions = []
+    for marker in markers:
+        for match in re.finditer(marker, content):
+            marker_positions.append((match.start(), marker.decode()))
+    
+    marker_positions.sort()
 
-    extracted_data = []
-    current_category = "HEADER/UNKNOWN"
+    # 3. Data Extraction Loop
+    total = len(marker_positions)
+    for i in range(total):
+        start_pos, category = marker_positions[i]
+        end_pos = marker_positions[i+1][0] if i+1 < total else len(content)
+        
+        segment = content[start_pos:end_pos]
+        matches = data_pattern.findall(segment)
+        
+        for m in matches:
+            value = m.decode('utf-8', errors='ignore').strip()
+            if value and value.upper() != category.upper():
+                extracted_records.append({"Category": category, "Value": value})
+        
+        # Update progress bar to prevent "Black Screen" / Timeout
+        progress_bar.progress((i + 1) / total)
 
-    try:
-        with open(input_file, 'rb') as f:
-            content = f.read()
-            matches = universal_pattern.finditer(content)
-
-            for match in matches:
-                raw_val = match.group()
-                
-                # Check if this string is actually a new category marker
-                is_marker = False
-                for km in known_markers:
-                    if km in raw_val.upper():
-                        current_category = km.decode('utf-8')
-                        is_marker = True
-                        break
-                
-                # If it's not a marker, it's data belonging to the last marker found
-                if not is_marker:
-                    try:
-                        decoded_val = raw_val.decode('utf-8').strip()
-                        if decoded_val:
-                            extracted_data.append({
-                                'Found_Under_Category': current_category,
-                                'Data_Value': decoded_val,
-                                'Byte_Position': match.start()
-                            })
-                    except:
-                        continue
-
-        # Save to CSV
-        with open(output_csv, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=['Found_Under_Category', 'Data_Value', 'Byte_Position'])
-            writer.writeheader()
-            writer.writerows(extracted_data)
-            
-        print(f"Extraction complete. Found {len(extracted_data)} data points.")
-
-    except Exception as e:
-        print(f"Error: {e}")
-
-extract_all_binary_data('KUMA3261.EXE', 'total_extraction.csv')
+    # 4. Display and Download
+    if extracted_records:
+        df = pd.DataFrame(extracted_records)
+        st.success(f"Successfully extracted {len(df)} records!")
+        
+        # Show a preview
+        st.dataframe(df.head(50))
+        
+        # Convert to CSV for download
+        csv_buffer = io.StringIO()
+        df.to_csv(csv_buffer, index=False)
+        st.download_button(
+            label="Download Full CSV",
+            data=csv_buffer.getvalue(),
+            file_name="extracted_catalog.csv",
+            mime="text/csv"
+        )
+    else:
+        st.warning("No structured data found. Try adjusting the markers.")
