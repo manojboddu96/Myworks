@@ -3,70 +3,58 @@ import re
 import pandas as pd
 import io
 
-st.title("Catalog Binary Extractor")
-st.write("Upload your .EXE file to convert the catalog into a structured format.")
+def extract_clean_catalog(binary_data):
+    # 1. Patterns specific to the screenshot provided
+    # Pattern A: Likely Item Codes (Alphanumeric, often with dashes/dots)
+    # Pattern B: Likely Prices (Digits followed by . or , and two decimals)
+    item_pattern = rb'[A-Z0-9\-\.]{4,15}'
+    price_pattern = rb'[0-9]{1,5}[\.,][0-9]{2}'
+    
+    # Combined pattern: Looking for an Item followed by a Price within a 50-byte window
+    combined_regex = re.compile(item_pattern + rb'.{1,50}' + price_pattern)
+    
+    results = []
+    
+    # 2. Scanning the file
+    matches = list(combined_regex.finditer(binary_data))
+    
+    for m in matches:
+        raw_segment = m.group()
+        # Clean the segment into readable parts
+        parts = re.findall(r'[A-Za-z0-9\-\.,]{3,}', raw_segment.decode('utf-8', 'ignore'))
+        
+        if len(parts) >= 2:
+            item = parts[0]
+            price = parts[-1]
+            
+            # 3. Context Search: Look backwards from this match to find the Group/Finish
+            # We look back 100 bytes to find the nearest descriptive word
+            context_area = binary_data[max(0, m.start()-100) : m.start()]
+            context_words = re.findall(rb'[A-Za-z\s]{4,}', context_area)
+            
+            group_name = context_words[-1].decode('utf-8', 'ignore').strip() if context_words else "Misc"
+            
+            results.append({
+                "Group/Finish": group_name,
+                "Item Code": item,
+                "Price": price
+            })
+            
+    return pd.DataFrame(results).drop_duplicates()
 
-uploaded_file = st.file_uploader("Choose a file", type=['exe'])
+# Streamlit Interface
+st.title("Catalog Deep-Structure Extractor")
+uploaded = st.file_uploader("Upload KUMA3261.EXE", type='exe')
 
-if uploaded_file is not None:
-    # Read the binary content
-    content = uploaded_file.read()
+if uploaded:
+    data = uploaded.read()
+    df = extract_clean_catalog(data)
     
-    # 1. Configuration
-    markers = [
-        b'SUPPLIER', b'GROUPS', b'MODELS', b'FINISHES', 
-        b'PRODUCTS', b'DESCRIPTION', b'PRICES', b'CODEPICS',
-        b'UNITS', b'DIMENSIONS', b'EAN'
-    ]
-    data_pattern = re.compile(rb'[A-Za-z0-9\s\.,\-\/]{3,100}')
-    
-    extracted_records = []
-    
-    # 2. Processing with Streamlit Progress Bar
-    progress_bar = st.progress(0)
-    st.info("Scanning binary structures...")
-    
-    # Find all marker positions
-    marker_positions = []
-    for marker in markers:
-        for match in re.finditer(marker, content):
-            marker_positions.append((match.start(), marker.decode()))
-    
-    marker_positions.sort()
-
-    # 3. Data Extraction Loop
-    total = len(marker_positions)
-    for i in range(total):
-        start_pos, category = marker_positions[i]
-        end_pos = marker_positions[i+1][0] if i+1 < total else len(content)
+    if not df.empty:
+        st.success(f"Extracted {len(df)} Clean Rows")
+        st.dataframe(df)
         
-        segment = content[start_pos:end_pos]
-        matches = data_pattern.findall(segment)
-        
-        for m in matches:
-            value = m.decode('utf-8', errors='ignore').strip()
-            if value and value.upper() != category.upper():
-                extracted_records.append({"Category": category, "Value": value})
-        
-        # Update progress bar to prevent "Black Screen" / Timeout
-        progress_bar.progress((i + 1) / total)
-
-    # 4. Display and Download
-    if extracted_records:
-        df = pd.DataFrame(extracted_records)
-        st.success(f"Successfully extracted {len(df)} records!")
-        
-        # Show a preview
-        st.dataframe(df.head(50))
-        
-        # Convert to CSV for download
-        csv_buffer = io.StringIO()
-        df.to_csv(csv_buffer, index=False)
-        st.download_button(
-            label="Download Full CSV",
-            data=csv_buffer.getvalue(),
-            file_name="extracted_catalog.csv",
-            mime="text/csv"
-        )
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button("Download CSV for Excel", csv, "catalog_data.csv", "text/csv")
     else:
-        st.warning("No structured data found. Try adjusting the markers.")
+        st.error("No structured rows found. The data might be encoded in a non-standard byte format.")
